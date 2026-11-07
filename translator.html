@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lingora - Free Online Translation</title>
+<link rel="icon" type="image/x-icon" href="logo.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main>
+  <h1>Translate text</h1>
+  <p class="sub">Type or paste text, pick a language, and translate.</p>
+
+  <div class="bar">
+    <select id="from" aria-label="Translate from"></select>
+    <button class="swap" id="swap" title="Swap languages" aria-label="Swap languages">⇄</button>
+    <select id="to" aria-label="Translate to"></select>
+  </div>
+
+  <div class="boxes">
+    <div class="box">
+      <textarea id="src" placeholder="Type text, or upload a .txt, .md, .srt or .vtt file" aria-label="Source text"></textarea>
+      <div class="tools">
+        <button id="up" type="button">Upload file</button>
+        <input type="file" id="file" accept=".txt,.md,.srt,.vtt,text/plain" hidden>
+        <button id="clear" type="button">Clear</button>
+        <span id="fname" title=""></span>
+        <span class="count"><span id="n">0</span> characters</span>
+      </div>
+    </div>
+    <div class="box">
+      <div class="out" id="out" aria-live="polite">Translation appears here.</div>
+      <div class="tools">
+        <button id="copy" type="button">Copy</button>
+        <button id="speak" type="button">Listen</button>
+        <select id="fmt" aria-label="Download format">
+          <option value="txt">Text (.txt)</option>
+          <option value="doc">Word (.doc)</option>
+          <option value="html">Web page (.html)</option>
+          <option value="csv">Spreadsheet (.csv)</option>
+          <option value="json">Data (.json)</option>
+        </select>
+        <button id="dl" type="button">Download</button>
+      </div>
+    </div>
+  </div>
+
+  <button class="go" id="go" type="button">Translate</button>
+</main>
+
+<script>
+const LANGS = {
+  af:"Afrikaans", sq:"Albanian", ar:"Arabic", hy:"Armenian", az:"Azerbaijani", eu:"Basque",
+  be:"Belarusian", bn:"Bengali", bs:"Bosnian", bg:"Bulgarian", ca:"Catalan", "zh-CN":"Chinese (Simplified)",
+  "zh-TW":"Chinese (Traditional)", hr:"Croatian", cs:"Czech", da:"Danish", nl:"Dutch", en:"English",
+  et:"Estonian", fil:"Filipino", fi:"Finnish", fr:"French", gl:"Galician", ka:"Georgian", de:"German",
+  el:"Greek", gu:"Gujarati", he:"Hebrew", hi:"Hindi", hu:"Hungarian", is:"Icelandic", id:"Indonesian",
+  ga:"Irish", it:"Italian", ja:"Japanese", kn:"Kannada", kk:"Kazakh", km:"Khmer", ko:"Korean",
+  lv:"Latvian", lt:"Lithuanian", mk:"Macedonian", ms:"Malay", ml:"Malayalam", mt:"Maltese",
+  mr:"Marathi", mn:"Mongolian", ne:"Nepali", no:"Norwegian", fa:"Persian", pl:"Polish",
+  pt:"Portuguese", pa:"Punjabi", ro:"Romanian", ru:"Russian", sr:"Serbian", si:"Sinhala",
+  sk:"Slovak", sl:"Slovenian", es:"Spanish", sw:"Swahili", sv:"Swedish", ta:"Tamil", te:"Telugu",
+  th:"Thai", tr:"Turkish", uk:"Ukrainian", ur:"Urdu", uz:"Uzbek", vi:"Vietnamese", cy:"Welsh"
+};
+const $ = id => document.getElementById(id);
+const from = $("from"), to = $("to"), src = $("src"), out = $("out"), go = $("go");
+
+function fill(sel, withAuto, def){
+  if (withAuto) sel.add(new Option("Detect language", "autodetect"));
+  for (const [c, n] of Object.entries(LANGS)) sel.add(new Option(n, c));
+  sel.value = def;
+}
+fill(from, true, "autodetect");
+fill(to, false, "es");
+
+src.addEventListener("input", () => { $("n").textContent = src.value.length; setFile(null); });
+$("clear").onclick = () => { src.value = ""; $("n").textContent = 0; out.textContent = ""; delete out.dataset.ok; setFile(null); src.focus(); };
+
+$("swap").onclick = () => {
+  if (from.value === "autodetect") return;
+  [from.value, to.value] = [to.value, from.value];
+  if (out.dataset.ok) { src.value = out.textContent; $("n").textContent = src.value.length; setFile(null); out.textContent = ""; delete out.dataset.ok; }
+};
+
+const MYMEMORY_EMAIL = "";          // optional: your email raises the free daily limit
+const MAX_CHUNK = 450;              // API accepts about 500 characters per request
+const NO_LETTERS = /^[^\p{L}]*$/u;  // numbers, timestamps, blank lines stay as they are
+const decode = s => { const t = document.createElement("textarea"); t.innerHTML = s; return t.value; };
+
+function chunkLine(line){
+  if (line.length <= MAX_CHUNK) return [line];
+  const parts = line.match(/[^.!?。！？]+[.!?。！？]*\s*/g) || [line];
+  const res = []; let cur = "";
+  for (let p of parts){
+    while (p.length > MAX_CHUNK){
+      let cut = p.lastIndexOf(" ", MAX_CHUNK); if (cut < 1) cut = MAX_CHUNK;
+      if (cur){ res.push(cur); cur = ""; }
+      res.push(p.slice(0, cut)); p = p.slice(cut);
+    }
+    if ((cur + p).length > MAX_CHUNK){ if (cur) res.push(cur); cur = p; } else cur += p;
+  }
+  if (cur) res.push(cur);
+  return res.map(s => s.trim()).filter(Boolean);
+}
+
+async function translateChunk(text){
+  let url = "https://api.mymemory.translated.net/get?q=" + encodeURIComponent(text) +
+            "&langpair=" + encodeURIComponent(from.value + "|" + to.value);
+  if (MYMEMORY_EMAIL) url += "&de=" + encodeURIComponent(MYMEMORY_EMAIL);
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Service returned " + res.status);
+  const data = await res.json();
+  if (data.responseStatus !== 200) throw new Error(data.responseDetails || "Translation failed");
+  return decode(data.responseData.translatedText);
+}
+
+async function translate(){
+  const text = src.value;
+  if (!text.trim()) { src.focus(); return; }
+  go.disabled = true; out.classList.remove("err"); delete out.dataset.ok;
+
+  const plan = text.split(/\r?\n/).map(l =>
+    (!l.trim() || NO_LETTERS.test(l)) ? {raw: l} : {chunks: chunkLine(l.trim())});
+  const total = plan.reduce((n, p) => n + (p.chunks ? p.chunks.length : 0), 0);
+  let done = 0; const result = [];
+
+  try {
+    for (const p of plan){
+      if (p.raw !== undefined) { result.push(p.raw); continue; }
+      const parts = [];
+      for (const c of p.chunks){
+        out.textContent = `Translating… ${done}/${total}\n\n` + result.join("\n");
+        parts.push(await translateChunk(c)); done++;
+      }
+      result.push(parts.join(" "));
+    }
+    out.textContent = result.join("\n");
+    out.dataset.ok = "1";
+  } catch (e) {
+    out.classList.add("err");
+    out.textContent = `Stopped at piece ${done + 1} of ${total}: ${e.message}.\n\nTry again later, add your email to MYMEMORY_EMAIL, or use a shorter file.` +
+      (result.length ? "\n\nTranslated so far:\n" + result.join("\n") : "");
+  } finally { go.disabled = false; }
+}
+go.onclick = translate;
+src.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") translate(); });
+
+$("copy").onclick = async () => {
+  if (!out.dataset.ok) return;
+  try { await navigator.clipboard.writeText(out.textContent); $("copy").textContent = "Copied"; }
+  catch { $("copy").textContent = "Copy failed"; }
+  setTimeout(() => $("copy").textContent = "Copy", 1500);
+};
+
+$("speak").onclick = () => {
+  if (!out.dataset.ok || !("speechSynthesis" in window)) return;
+  const u = new SpeechSynthesisUtterance(out.textContent);
+  u.lang = to.value;
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
+};
+
+function save(name, mime, content){
+  const blob = new Blob([content], {type: mime + ";charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+const esc = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+
+$("dl").onclick = () => {
+  const btn = $("dl");
+  if (!out.dataset.ok) {
+    btn.textContent = "Translate first";
+    setTimeout(() => btn.textContent = "Download", 1600);
+    return;
+  }
+  const original = src.value.trim(), result = out.textContent;
+  const fl = from.value === "autodetect" ? "auto" : from.value, tl = to.value;
+  const base = `translation-${fl}-${tl}`;
+  const fmt = $("fmt").value;
+
+  if (fmt === "txt") {
+    if (fileInfo) save(`${fileInfo.stem}-${tl}${fileInfo.ext}`, "text/plain", result);
+    else save(base + ".txt", "text/plain", result);
+  } else if (fmt === "doc") {
+    const body = `<html xmlns:w="urn:schemas-microsoft-com:office:word"><head><meta charset="utf-8"><title>Translation</title></head><body><p>${esc(result).replace(/\n/g,"<br>")}</p></body></html>`;
+    save(base + ".doc", "application/msword", body);
+  } else if (fmt === "html") {
+    const page = `<!DOCTYPE html><html lang="${tl}"><head><meta charset="utf-8"><title>Translation</title></head><body><h2>${esc(LANGS[fl] || "Original")}</h2><p>${esc(original).replace(/\n/g,"<br>")}</p><h2>${esc(LANGS[tl])}</h2><p>${esc(result).replace(/\n/g,"<br>")}</p></body></html>`;
+    save(base + ".html", "text/html", page);
+  } else if (fmt === "csv") {
+    const q = s => '"' + s.replace(/"/g,'""') + '"';
+    save(base + ".csv", "text/csv", "\ufeff" + `source_lang,target_lang,original,translation\n${fl},${tl},${q(original)},${q(result)}\n`);
+  } else if (fmt === "json") {
+    save(base + ".json", "application/json", JSON.stringify({from: fl, to: tl, original, translation: result}, null, 2));
+  }
+  btn.textContent = "Downloaded";
+  setTimeout(() => btn.textContent = "Download", 1500);
+};
+
+let fileInfo = null;
+function setFile(info){
+  fileInfo = info;
+  $("fname").textContent = info ? info.name : "";
+  $("fname").title = info ? info.name : "";
+}
+const OK_EXT = /\.(txt|md|srt|vtt)$/i;
+async function loadFile(f){
+  if (!f) return;
+  if (!OK_EXT.test(f.name)) { out.classList.add("err"); out.textContent = "This file type is not supported. Use .txt, .md, .srt or .vtt."; return; }
+  if (f.size > 200 * 1024) { out.classList.add("err"); out.textContent = "This file is over 200 KB. Split it into smaller files."; return; }
+  const text = await f.text();
+  src.value = text; $("n").textContent = text.length;
+  const dot = f.name.lastIndexOf(".");
+  setFile({name: f.name, stem: f.name.slice(0, dot), ext: f.name.slice(dot)});
+  delete out.dataset.ok; out.classList.remove("err");
+  const pieces = text.split(/\r?\n/).reduce((n, l) => n + ((!l.trim() || NO_LETTERS.test(l)) ? 0 : chunkLine(l.trim()).length), 0);
+  out.textContent = `Loaded ${f.name}: ${text.length.toLocaleString()} characters, about ${pieces} requests. Press Translate.` +
+    (text.length > 5000 && !MYMEMORY_EMAIL ? "\n\nThis is over the free daily limit of about 5,000 characters. Add your email to MYMEMORY_EMAIL in the script to raise it." : "");
+}
+$("up").onclick = () => $("file").click();
+$("file").onchange = e => { loadFile(e.target.files[0]); e.target.value = ""; };
+const srcBox = src.closest(".box");
+["dragenter","dragover"].forEach(ev => srcBox.addEventListener(ev, e => { e.preventDefault(); srcBox.classList.add("drag"); }));
+["dragleave","drop"].forEach(ev => srcBox.addEventListener(ev, e => { e.preventDefault(); srcBox.classList.remove("drag"); }));
+srcBox.addEventListener("drop", e => loadFile(e.dataTransfer.files[0]));
+</script>
+</body>
+</html>
